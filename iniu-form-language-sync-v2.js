@@ -1,26 +1,28 @@
 /**
- * INIU Form Language Sync — v2 (下拉值映射版)
+ * INIU Form Language Sync — v2（最终版：语言切换器 → Dropdown 字段）
  * -------------------------------------------------------------------------
  * 用途：
- *   在 123FormBuilder 表单中，监听页面上的「语言选择器」（language-selector），
- *   当用户切换语言时，将选中的「下拉值」映射为 ISO 语言代码，
- *   再写入一个隐藏的目标字段，使表单提交时能够携带用户所选择的语言信息。
+ *   在 123FormBuilder 表单中，监听页面顶部的「语言切换器」
+ *   （<select data-role="language-dropdown">），当用户切换语言时，
+ *   把选中的语言 code 原样写入目标 Dropdown 字段（ID 121884187），
+ *   使表单提交时能够携带用户所选择的语言信息。
  *
- * 与 v1 的区别：
- *   - v1 直接把下拉值写入目标字段；
- *   - v2 增加了一层「下拉值 → ISO 语言代码」的映射（见 LANGUAGE_MAP）。
+ * 关键事实（从表单真实 DOM 确认）：
+ *   - 语言切换器 = <select data-role="language-dropdown">，option value 为语言 code
+ *     （Languages: en/it/es/fr/nl/sa/dk/pl/ie/pt/fi/se/jp/de，共 14 个）
+ *   - 目标 Dropdown 字段 ID = 121884187，选项为
+ *     en/dk/de/pt/es/fr/it/nl/pl/fi/se/sa/jp（共 13 个，不含 ie）
+ *   - 两套 code 完全一致，因此【直接透传，无需映射】
  *
  * 依赖：
  *   - 123FormBuilder 的全局 `loader` 对象（用于获取引擎 / 文档实例）。
- *   - 页面上存在 `[data-type="language-selector"] select` 元素。
  *
  * 用法：
  *   1. 在表单的「自定义代码 / Custom Code」区域引入本文件；
- *   2. 按需修改下方 CONFIG 中的 TARGET_FIELD_ID 为目标字段 ID；
- *   3. 按需调整 LANGUAGE_MAP 中的下拉值 → ISO 代码映射。
+ *   2. 如需改动目标字段 ID，修改下方 CONFIG.TARGET_FIELD_ID。
  *
  * @author  INIU
- * @version 2.0.0
+ * @version 2.1.0
  * -------------------------------------------------------------------------
  */
 (function () {
@@ -30,59 +32,44 @@
      * 配置区（按需修改）
      * ========================================================================= */
     var CONFIG = {
-        /** 隐藏目标字段的 ID（用于接收语言代码） */
-        TARGET_FIELD_ID: 121872774,
+        /** 目标 Dropdown 字段的 ID（用于接收语言 code） */
+        TARGET_FIELD_ID: 121884187,
 
         /**
-         * 语言选择器的候选 CSS 选择器（按优先级依次尝试）。
+         * 语言切换器的候选 CSS 选择器（按优先级依次尝试）。
          * 第一个命中的将被使用。若都未命中，会回退到「页面上唯一的 select」。
+         * 正确属性为 data-role="language-dropdown"。
          */
         LANGUAGE_SELECTOR: [
-            '[data-type="language-selector"] select',
+            'select[data-role="language-dropdown"]',
+            '[data-role="language-dropdown"]',
             'select[data-type="language-selector"]',
-            '.language-selector select',
-            'select.language-selector'
+            '.language-selector select'
         ],
 
         /**
-         * 下拉值 → ISO 语言代码 映射表。
-         * key   = 语言选择器（下拉）的 option value
-         * value = 最终写入 Zendesk / 目标字段的 ISO 语言代码
-         *
-         * 注：下拉实际选项值为 en/dk/de/pt/es/fr/it/nl/pl/fi/se/sa/jp/ie
-         *     其中 se→sv、sa→ar、jp→ja、dk→da、ie→ga 为国家码→ISO 转换，
-         *     其余代码原样透传。
+         * Dropdown 目标字段支持的选项值集合。
+         * 语言切换器可能返回这些之外的值（如 ie），此时按 FALLBACK_STRATEGY 兜底。
          */
-        LANGUAGE_MAP: {
-            en: 'en',   // English
-            dk: 'da',   // Danish
-            de: 'de',   // German
-            pt: 'pt',   // Portuguese
-            es: 'es',   // Spanish
-            fr: 'fr',   // French
-            it: 'it',   // Italian
-            nl: 'nl',   // Dutch
-            pl: 'pl',   // Polish
-            fi: 'fi',   // Finnish
-            se: 'sv',   // Swedish
-            sa: 'ar',   // Arabic
-            jp: 'ja',   // Japanese
-            ie: 'ga'    // Irish
+        VALID_CODES: {
+            en: true, dk: true, de: true, pt: true, es: true,
+            fr: true, it: true, nl: true, pl: true, fi: true,
+            se: true, sa: true, jp: true
         },
 
         /**
-         * 当下拉值不在映射表中时的兜底策略：
-         *   'value'  - 原样写入下拉值（默认）
-         *   ''       - 写入空值（不写入）
-         *   'en'     - 回退为英文
+         * 当语言 code 不在 Dropdown 选项内时的兜底策略：
+         *   'en'   - 回退为英文（默认，安全）
+         *   ''     - 写入空值（不写入）
+         *   'raw'  - 强行原样写入（可能导致 Dropdown 无法选中）
          */
-        FALLBACK_STRATEGY: 'value',
+        FALLBACK_STRATEGY: 'en',
 
         /** 绑定标志（用于防止重复绑定事件） */
         BIND_FLAG: 'iniuLanguageBound',
 
         /** 页面加载后，尝试绑定语言选择器的延迟时间点（毫秒） */
-        BIND_RETRY_DELAYS: [500, 1500, 3000],
+        BIND_RETRY_DELAYS: [300, 800, 1500, 3000],
 
         /** 语言切换后，写入目标字段的延迟（毫秒），用于等待表单引擎就绪 */
         SYNC_DELAYS: [100, 500],
@@ -115,10 +102,10 @@
     }
 
     /**
-     * 获取页面上的语言选择器元素。
+     * 获取页面上的语言切换器元素（<select data-role="language-dropdown">）。
      * 依次尝试 CONFIG.LANGUAGE_SELECTOR 中的候选选择器；
      * 若都未命中，且页面仅存在一个 select，则回退到该 select。
-     * @returns {HTMLSelectElement|null} 语言选择器，或 null（未找到）。
+     * @returns {HTMLSelectElement|null} 语言切换器，或 null（未找到）。
      */
     function getLanguageSelect() {
         var i, el;
@@ -163,31 +150,36 @@
     }
 
     /**
-     * 将「下拉值」映射为最终写入的 ISO 语言代码。
-     * @param {string} rawValue - 语言选择器的原始 value。
-     * @returns {string} 映射后的语言代码。
+     * 规范化语言 code：校验是否在 Dropdown 支持的选项内，必要时兜底。
+     * @param {string} rawCode - 语言切换器返回的 code。
+     * @returns {string} 最终写入 Dropdown 字段的 code。
      */
-    function mapLanguageCode(rawValue) {
-        if (Object.prototype.hasOwnProperty.call(CONFIG.LANGUAGE_MAP, rawValue)) {
-            return CONFIG.LANGUAGE_MAP[rawValue];
+    function normalizeLanguageCode(rawCode) {
+        if (!rawCode) {
+            return '';
         }
 
-        // 未命中映射表时的兜底策略
+        // 命中合法选项，直接透传
+        if (Object.prototype.hasOwnProperty.call(CONFIG.VALID_CODES, rawCode)) {
+            return rawCode;
+        }
+
+        // 未命中（如 ie），按兜底策略处理
         if (CONFIG.FALLBACK_STRATEGY === '') {
-            log('warn', 'Unmapped language value, writing empty: ' + rawValue);
+            log('warn', 'Unsupported language code, writing empty: ' + rawCode);
             return '';
-        } else if (CONFIG.FALLBACK_STRATEGY === 'en') {
-            log('warn', 'Unmapped language value, fallback to en: ' + rawValue);
-            return 'en';
+        } else if (CONFIG.FALLBACK_STRATEGY === 'raw') {
+            log('warn', 'Unsupported language code, passing through: ' + rawCode);
+            return rawCode;
         } else {
-            // 默认 'value'：原样透传
-            log('warn', 'Unmapped language value, passing through: ' + rawValue);
-            return rawValue;
+            // 默认 'en'
+            log('warn', 'Unsupported language code "' + rawCode + '", fallback to en.');
+            return 'en';
         }
     }
 
     /**
-     * 将当前语言代码（映射后）写入目标字段。
+     * 将当前语言 code 写入目标 Dropdown 字段。
      * @returns {boolean} 是否成功写入。
      */
     function setFormLanguage() {
@@ -197,12 +189,12 @@
                 return false;
             }
 
-            var rawValue = languageSelect.value;
-            if (!rawValue) {
+            var rawCode = languageSelect.value;
+            if (!rawCode) {
                 return false;
             }
 
-            var languageCode = mapLanguageCode(rawValue);
+            var languageCode = normalizeLanguageCode(rawCode);
             if (!languageCode) {
                 return false;
             }
@@ -214,14 +206,17 @@
 
             var targetField = documentInstance.getElementById(CONFIG.TARGET_FIELD_ID);
             if (!targetField) {
+                log('warn', 'Target field not found: ' + CONFIG.TARGET_FIELD_ID);
                 return false;
             }
 
+            // Dropdown 字段写入：需要匹配到对应 option 的 index
+            // 先尝试 setValue({value})，若字段是下拉则需按 choices 匹配
             targetField.setValue({
                 value: languageCode
             });
 
-            log('info', 'Form Language synced: ' + rawValue + ' -> ' + languageCode);
+            log('info', 'Form Language synced: ' + rawCode + ' -> ' + languageCode);
             return true;
         } catch (error) {
             log('error', 'Form Language sync error: ' + error.message);
@@ -230,8 +225,8 @@
     }
 
     /**
-     * 为语言选择器绑定 change 事件。
-     * 使用「事件委托」绑定到 document，即使语言选择器被重新渲染也不会丢失监听。
+     * 为语言切换器绑定 change 事件。
+     * 使用「事件委托」绑定到 document，即使语言切换器被重新渲染也不会丢失监听。
      * @returns {boolean} 是否成功找到选择器（用于日志提示）。
      */
     function bindLanguageSelector() {
@@ -248,9 +243,8 @@
                     return;
                 }
 
-                // 仅处理语言选择器（或其 fallback 的那个 select）
-                var current = getLanguageSelect();
-                if (target !== current) {
+                // 仅处理语言切换器（data-role="language-dropdown"）
+                if (target.getAttribute('data-role') !== 'language-dropdown') {
                     return;
                 }
 
@@ -280,7 +274,7 @@
             setTimeout(bindLanguageSelector, delay);
         });
 
-        // 2. 监听 DOM 变化，一旦语言选择器出现则立即绑定
+        // 2. 监听 DOM 变化，一旦语言切换器出现则立即绑定
         if (typeof MutationObserver === 'function') {
             var observer = new MutationObserver(function () {
                 bindLanguageSelector();
