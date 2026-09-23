@@ -33,13 +33,25 @@
         /** 隐藏目标字段的 ID（用于接收语言代码） */
         TARGET_FIELD_ID: 121872774,
 
-        /** 语言选择器的 CSS 选择器 */
-        LANGUAGE_SELECTOR: '[data-type="language-selector"] select',
+        /**
+         * 语言选择器的候选 CSS 选择器（按优先级依次尝试）。
+         * 第一个命中的将被使用。若都未命中，会回退到「页面上唯一的 select」。
+         */
+        LANGUAGE_SELECTOR: [
+            '[data-type="language-selector"] select',
+            'select[data-type="language-selector"]',
+            '.language-selector select',
+            'select.language-selector'
+        ],
 
         /**
          * 下拉值 → ISO 语言代码 映射表。
          * key   = 语言选择器（下拉）的 option value
          * value = 最终写入 Zendesk / 目标字段的 ISO 语言代码
+         *
+         * 注：下拉实际选项值为 en/dk/de/pt/es/fr/it/nl/pl/fi/se/sa/jp/ie
+         *     其中 se→sv、sa→ar、jp→ja、dk→da、ie→ga 为国家码→ISO 转换，
+         *     其余代码原样透传。
          */
         LANGUAGE_MAP: {
             en: 'en',   // English
@@ -104,10 +116,29 @@
 
     /**
      * 获取页面上的语言选择器元素。
+     * 依次尝试 CONFIG.LANGUAGE_SELECTOR 中的候选选择器；
+     * 若都未命中，且页面仅存在一个 select，则回退到该 select。
      * @returns {HTMLSelectElement|null} 语言选择器，或 null（未找到）。
      */
     function getLanguageSelect() {
-        return document.querySelector(CONFIG.LANGUAGE_SELECTOR);
+        var i, el;
+
+        // 1. 依次尝试候选选择器
+        for (i = 0; i < CONFIG.LANGUAGE_SELECTOR.length; i++) {
+            el = document.querySelector(CONFIG.LANGUAGE_SELECTOR[i]);
+            if (el) {
+                return el;
+            }
+        }
+
+        // 2. 回退：页面只有一个 select 时，直接使用它
+        var allSelects = document.querySelectorAll('select');
+        if (allSelects.length === 1) {
+            log('info', 'Fallback: using the only <select> on page.');
+            return allSelects[0];
+        }
+
+        return null;
     }
 
     /**
@@ -199,8 +230,9 @@
     }
 
     /**
-     * 为语言选择器绑定 change 事件（仅绑定一次）。
-     * @returns {boolean} 是否成功找到并（重新）初始化了选择器。
+     * 为语言选择器绑定 change 事件。
+     * 使用「事件委托」绑定到 document，即使语言选择器被重新渲染也不会丢失监听。
+     * @returns {boolean} 是否成功找到选择器（用于日志提示）。
      */
     function bindLanguageSelector() {
         var languageSelect = getLanguageSelect();
@@ -208,17 +240,28 @@
             return false;
         }
 
-        // 防止重复绑定
-        if (languageSelect.dataset[CONFIG.BIND_FLAG] !== '1') {
-            languageSelect.addEventListener('change', function () {
+        // 事件委托：document 级监听 change，避免元素重建导致监听丢失
+        if (!document[CONFIG.BIND_FLAG]) {
+            document.addEventListener('change', function (event) {
+                var target = event.target;
+                if (!target || target.tagName !== 'SELECT') {
+                    return;
+                }
+
+                // 仅处理语言选择器（或其 fallback 的那个 select）
+                var current = getLanguageSelect();
+                if (target !== current) {
+                    return;
+                }
+
                 // 分两次延迟写入，确保表单引擎完成语言切换后再同步
                 CONFIG.SYNC_DELAYS.forEach(function (delay) {
                     setTimeout(setFormLanguage, delay);
                 });
             });
 
-            languageSelect.dataset[CONFIG.BIND_FLAG] = '1';
-            log('info', 'Language selector bound.');
+            document[CONFIG.BIND_FLAG] = true;
+            log('info', 'Language selector bound (event delegation).');
         }
 
         // 初始化时同步一次当前语言
