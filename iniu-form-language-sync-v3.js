@@ -7,9 +7,10 @@
  *   使表单提交时能携带用户所选语言信息（供 Zendesk 按语言自动回复）。
  *
  * v3 关键结论（从 123FormBuilder 引擎源码 + 官方文档确认）：
- *   1. 语言切换器 = <select data-role="language-dropdown">，其 option 的
- *      value 即语言 code（如 nl / en / it），与 Dropdown 字段选项完全一致，
- *      因此【直接透传，无需映射】。
+ *   1. 语言切换器模板为 <select data-role="language-dropdown">，但渲染后经
+ *      upgradeDropdown() 升级为自定义 dropdown 组件，data-role 被改为
+ *      "i123-input"，外层容器为 div[data-role="control"][data-type="language-selector"]，
+ *      组件内部仍保留一个原生 <select>（nativeDropDown），其 value 即语言 code。
  *   2. 写入字段采用【官方 API 优先 + DOM 直连兜底】双保险：
  *      - 首选 loader.getDOMAbstractionLayer().setControlValueById(id, value)
  *        （123FormBuilder 官方推荐的字段赋值入口）
@@ -34,7 +35,7 @@
  *   2. 如需改动目标字段 ID，修改下方 CONFIG.TARGET_FIELD_ID。
  *
  * @author  INIU
- * @version 3.1.0
+ * @version 3.2.0
  * -------------------------------------------------------------------------
  */
 (function () {
@@ -46,12 +47,20 @@
 
         /**
          * 语言切换器候选选择器（按优先级尝试，第一个命中即用）。
-         * 已确认真实结构为 <select data-role="language-dropdown">。
+         *
+         * 真实运行时结构（已从引擎源码确认）：
+         *   模板 <select data-role="language-dropdown"> 渲染后，被 upgradeDropdown()
+         *   升级为自定义 dropdown 组件，data-role 被改为 "i123-input"，
+         *   data-type 变为 "dropdown"，外层容器是：
+         *     div[data-role="control"][data-type="language-selector"]
+         *   组件内部仍保留一个原生 <select>（nativeDropDown）。
          */
         LANGUAGE_SELECTOR: [
-            'select[data-role="language-dropdown"]',
-            '[data-role="language-dropdown"]',
+            'div[data-role="control"][data-type="language-selector"] select',
+            'div[data-role="control"][data-type="language-selector"] [data-type="dropdown"] select',
+            '[data-type="language-selector"] select',
             '[data-role="language-selector"] select',
+            'select[data-role="language-dropdown"]',
             'select[data-type="language-selector"]'
         ],
 
@@ -262,12 +271,25 @@
 
         document.addEventListener('change', function (event) {
             var target = event.target;
-            if (!target || target.tagName !== 'SELECT') { return; }
+            if (!target) { return; }
 
-            var isLangSelector =
-                target.getAttribute('data-role') === 'language-dropdown' ||
-                target.getAttribute('data-role') === 'language-selector' ||
-                (target.closest && target.closest('[data-role="language-selector"]'));
+            // 判断是否发生在语言选择器容器内（不限定元素类型，
+            // 因为自定义 dropdown 组件的 change 可能来自内部原生 select
+            // 或组件根节点 div[data-type=dropdown]）。
+            var isLangSelector = false;
+            if (target.closest) {
+                isLangSelector =
+                    !!target.closest('[data-type="language-selector"]') ||
+                    !!target.closest('[data-role="language-selector"]');
+            }
+            if (!isLangSelector && target.getAttribute) {
+                var role = target.getAttribute('data-role');
+                var type = target.getAttribute('data-type');
+                isLangSelector =
+                    role === 'language-dropdown' ||
+                    role === 'language-selector' ||
+                    type === 'language-selector';
+            }
 
             if (!isLangSelector) { return; }
 
