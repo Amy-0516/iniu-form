@@ -1,20 +1,21 @@
 /**
- * INIU Form Language Sync — v3（DOM 直连版：语言切换器 → Dropdown 字段）
+ * INIU Form Language Sync — v3（语言切换器 → Dropdown 字段）
  * -------------------------------------------------------------------------
  * 用途：
  *   在 123FormBuilder 表单中，当用户切换页面顶部的「语言切换器」时，
  *   把选中的语言 code 原样写入目标 Dropdown 字段（ID 121884187），
  *   使表单提交时能携带用户所选语言信息（供 Zendesk 按语言自动回复）。
  *
- * v3 相较 v2 的核心修正（从 123FormBuilder 引擎源码 + 运行时 DOM 确认）：
+ * v3 关键结论（从 123FormBuilder 引擎源码 + 官方文档确认）：
  *   1. 语言切换器 = <select data-role="language-dropdown">，其 option 的
  *      value 即语言 code（如 nl / en / it），与 Dropdown 字段选项完全一致，
  *      因此【直接透传，无需映射】。
- *   2. Dropdown 字段的引擎 setValue 期望「原生 option 的 value 字符串」，
- *      而非 {value:...} 对象；v2 误传对象导致写入失败。
- *   3. v3 改为【直接操作目标字段的原生 <select> DOM】，设置 .value 后主动
- *      trigger change，让 123FormBuilder 自身的监听器捕获并同步字段值。
- *      这是最稳健、不依赖内部引擎 API 的方式。
+ *   2. 写入字段采用【官方 API 优先 + DOM 直连兜底】双保险：
+ *      - 首选 loader.getDOMAbstractionLayer().setControlValueById(id, value)
+ *        （123FormBuilder 官方推荐的字段赋值入口）
+ *      - 兜底：直接操作目标字段容器内的原生 <select>，设 .value + trigger change
+ *   3. 事件委托监听语言切换器的 change，切换后分多次延迟写入，
+ *      以等待表单引擎完成语言重渲染。
  *
  * 目标字段运行时 DOM 结构（已确认）：
  *   <div data-role="control" data-id="121884187" ...>
@@ -23,15 +24,17 @@
  *       </div>
  *   </div>
  *
- * 依赖：无（纯 DOM 操作 + 事件委托，不依赖 loader / Engine 全局对象）。
+ * 依赖：优先使用全局 loader（123FormBuilder 提供），缺失时退回纯 DOM 操作。
  *
  * 用法：
- *   1. 在表单「自定义代码 / Custom Code」区域引入本文件（建议用 raw 链接：
- *      https://raw.githubusercontent.com/Amy-0516/iniu-form/main/iniu-form-language-sync-v3.js）
+ *   1. 在表单 Advanced → Form → "Add a JS script to your form" 粘贴脚本 URL。
+ *      ⚠️ 必须使用 GitHub Pages 链接（返回 application/javascript MIME）：
+ *      https://amy-0516.github.io/iniu-form/iniu-form-language-sync-v3.js
+ *      ❌ 不要用 raw.githubusercontent.com（返回 text/plain，浏览器拒绝执行）。
  *   2. 如需改动目标字段 ID，修改下方 CONFIG.TARGET_FIELD_ID。
  *
  * @author  INIU
- * @version 3.0.0
+ * @version 3.1.0
  * -------------------------------------------------------------------------
  */
 (function () {
@@ -101,12 +104,20 @@
         return null;
     }
 
+    /** 获取全局 loader（123FormBuilder 提供） */
+    function getLoader() {
+        try {
+            if (window.loader) { return window.loader; }
+            if (window.Engine) { return window.Engine; }
+        } catch (e) {}
+        return null;
+    }
+
     /**
      * 获取目标 Dropdown 字段的原生 <select>。
      * 先按 data-id 定位字段容器，再取其中的原生 select。
      */
     function getTargetSelect() {
-        // 1. 按 data-id 定位字段容器
         var container = document.querySelector(
             '[data-role="control"][data-id="' + CONFIG.TARGET_FIELD_ID + '"],' +
             '[data-id="' + CONFIG.TARGET_FIELD_ID + '"]'
@@ -122,7 +133,6 @@
     function normalizeCode(rawCode) {
         if (!rawCode) { return null; }
         if (CONFIG.VALID_CODES[rawCode]) { return rawCode; }
-        // 大小写兜底
         var lower = String(rawCode).toLowerCase();
         if (CONFIG.VALID_CODES[lower]) { return lower; }
         warn('Unsupported language code "' + rawCode + '", fallback to ' + CONFIG.FALLBACK_LANGUAGE);
@@ -130,7 +140,7 @@
     }
 
     /* =============================================================
-     * 写入逻辑（核心：直接操作原生 select DOM）
+     * 写入逻辑（核心：官方 API 优先 + DOM 直连兜底）
      * ============================================================= */
     function syncLanguage() {
         var langSelect = getLanguageSelect();
@@ -148,13 +158,61 @@
         var code = normalizeCode(rawCode);
         if (!code) { return false; }
 
+        // 策略 1：官方 API —— loader.getDOMAbstractionLayer().setControlValueById()
+        if (writeViaOfficialAPI(code)) {
+            log('Synced (official API): language "' + rawCode + '" -> dropdown "' + code + '"');
+            return true;
+        }
+
+        // 策略 2：DOM 直连 —— 直接操作目标字段原生 select
+        if (writeViaDOM(code)) {
+            log('Synced (DOM fallback): language "' + rawCode + '" -> dropdown "' + code + '"');
+            return true;
+        }
+
+        warn('Failed to write language code "' + code + '" to target field ' + CONFIG.TARGET_FIELD_ID);
+        return false;
+    }
+
+    /** 策略 1：官方 API 写入 */
+    function writeViaOfficialAPI(code) {
+        var loader = getLoader();
+        if (!loader) { return false; }
+        try {
+            var dal = loader.getDOMAbstractionLayer
+                ? loader.getDOMAbstractionLayer()
+                : null;
+            if (dal && dal.setControlValueById) {
+                dal.setControlValueById(CONFIG.TARGET_FIELD_ID, code);
+                return true;
+            }
+        } catch (e) {
+            warn('Official API write failed:', e);
+        }
+        // 尝试引擎 document 方式
+        try {
+            var engine = loader.engine || loader.getEngine ? (loader.getEngine ? loader.getEngine() : null) : null;
+            if (engine && engine.document && engine.document.getElementById) {
+                var field = engine.document.getElementById(CONFIG.TARGET_FIELD_ID);
+                if (field && field.setValue) {
+                    field.setValue({ value: code });
+                    return true;
+                }
+            }
+        } catch (e2) {
+            warn('Engine document write failed:', e2);
+        }
+        return false;
+    }
+
+    /** 策略 2：DOM 直连写入 */
+    function writeViaDOM(code) {
         var targetSelect = getTargetSelect();
         if (!targetSelect) {
             warn('Target dropdown field not found: ' + CONFIG.TARGET_FIELD_ID);
             return false;
         }
 
-        // 检查目标 select 是否有该 value 对应的 option
         var matched = false;
         var options = targetSelect.options || [];
         for (var i = 0; i < options.length; i++) {
@@ -166,14 +224,11 @@
         }
 
         if (!matched) {
-            warn('No matching option "' + code + '" in target dropdown. Options:', options);
+            warn('No matching option "' + code + '" in target dropdown.');
             return false;
         }
 
-        // 触发 change 事件，让 123FormBuilder 自身监听器捕获并同步字段值
         triggerChange(targetSelect);
-
-        log('Synced: language "' + rawCode + '" -> dropdown "' + code + '"');
         return true;
     }
 
@@ -209,7 +264,6 @@
             var target = event.target;
             if (!target || target.tagName !== 'SELECT') { return; }
 
-            // 仅处理语言切换器
             var isLangSelector =
                 target.getAttribute('data-role') === 'language-dropdown' ||
                 target.getAttribute('data-role') === 'language-selector' ||
@@ -217,7 +271,6 @@
 
             if (!isLangSelector) { return; }
 
-            // 分多次延迟写入，等待表单引擎完成语言重渲染
             CONFIG.SYNC_DELAYS.forEach(function (delay) {
                 setTimeout(syncLanguage, delay);
             });
@@ -239,11 +292,15 @@
         });
 
         // 2. DOM 变化时重新尝试（应对动态渲染）
-        if (typeof MutationObserver === 'function') {
-            var observer = new MutationObserver(function () {
-                bindOnce();
-            });
-            observer.observe(document.body, { childList: true, subtree: true });
+        try {
+            if (typeof MutationObserver === 'function' && document.body) {
+                var observer = new MutationObserver(function () {
+                    bindOnce();
+                });
+                observer.observe(document.body, { childList: true, subtree: true });
+            }
+        } catch (e) {
+            warn('MutationObserver init failed:', e);
         }
     }
 
